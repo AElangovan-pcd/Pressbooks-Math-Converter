@@ -9,11 +9,21 @@ import {
   AlertCircle,
   ArrowRight,
   Info,
-  Trash2
+  Trash2,
+  Download,
+  FileText
 } from 'lucide-react';
 import { useDropzone } from 'react-dropzone';
 import { motion, AnimatePresence } from 'motion/react';
+import * as mammoth from 'mammoth';
+import * as pdfjs from 'pdfjs-dist';
+import { jsPDF } from 'jspdf';
 import { convertToPressbooks, ConversionResult } from './services/geminiService';
+
+// Set PDF.js worker using the local worker from the package
+// @ts-ignore
+import pdfjsWorker from 'pdfjs-dist/build/pdf.worker.mjs?url';
+pdfjs.GlobalWorkerOptions.workerSrc = pdfjsWorker;
 import Markdown from 'react-markdown';
 import { clsx, type ClassValue } from 'clsx';
 import { twMerge } from 'tailwind-merge';
@@ -31,16 +41,54 @@ export default function App() {
   const [copied, setCopied] = useState(false);
   const [activeTab, setActiveTab] = useState<'text' | 'file' | 'url'>('text');
 
-  const onDrop = useCallback((acceptedFiles: File[]) => {
+  const extractTextFromPDF = async (file: File): Promise<string> => {
+    const arrayBuffer = await file.arrayBuffer();
+    const loadingTask = pdfjs.getDocument({ data: arrayBuffer });
+    const pdf = await loadingTask.promise;
+    let fullText = '';
+    for (let i = 1; i <= pdf.numPages; i++) {
+      const page = await pdf.getPage(i);
+      const textContent = await page.getTextContent();
+      const pageText = textContent.items.map((item: any) => item.str).join(' ');
+      fullText += pageText + '\n';
+    }
+    return fullText;
+  };
+
+  const extractTextFromDocx = async (file: File): Promise<string> => {
+    const arrayBuffer = await file.arrayBuffer();
+    const result = await mammoth.convertToHtml({ arrayBuffer });
+    return result.value;
+  };
+
+  const onDrop = useCallback(async (acceptedFiles: File[]) => {
     const file = acceptedFiles[0];
-    if (file) {
-      const reader = new FileReader();
-      reader.onload = (e) => {
-        const content = e.target?.result as string;
-        setInput(content);
-        setActiveTab('text');
-      };
-      reader.readAsText(file);
+    if (!file) return;
+
+    setIsLoading(true);
+    setError(null);
+
+    try {
+      if (file.type === 'application/pdf' || file.name.endsWith('.pdf')) {
+        const text = await extractTextFromPDF(file);
+        setInput(text);
+      } else if (file.type === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' || file.name.endsWith('.docx')) {
+        const text = await extractTextFromDocx(file);
+        setInput(text);
+      } else {
+        const reader = new FileReader();
+        reader.onload = (e) => {
+          const content = e.target?.result as string;
+          setInput(content);
+        };
+        reader.readAsText(file);
+      }
+      setActiveTab('text');
+    } catch (err: any) {
+      console.error("File extraction error:", err);
+      setError(`Failed to extract text from file: ${err.message}`);
+    } finally {
+      setIsLoading(false);
     }
   }, []);
 
@@ -50,6 +98,8 @@ export default function App() {
       'text/plain': ['.txt'],
       'text/html': ['.html', '.htm'],
       'text/markdown': ['.md'],
+      'application/pdf': ['.pdf'],
+      'application/vnd.openxmlformats-officedocument.wordprocessingml.document': ['.docx'],
     },
     multiple: false
   });
@@ -100,6 +150,42 @@ export default function App() {
     setResult(null);
     setError(null);
     setUrl('');
+  };
+
+  const downloadMarkdown = () => {
+    if (!result) return;
+    const blob = new Blob([result.convertedContent], { type: 'text/markdown' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'pressbook-chapter.md';
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  };
+
+  const downloadPDF = () => {
+    if (!result) return;
+    const doc = new jsPDF();
+    const margin = 10;
+    const pageWidth = doc.internal.pageSize.getWidth();
+    const pageHeight = doc.internal.pageSize.getHeight();
+    const maxLineWidth = pageWidth - margin * 2;
+    
+    const lines = doc.splitTextToSize(result.convertedContent, maxLineWidth);
+    let cursorY = margin;
+
+    lines.forEach((line: string) => {
+      if (cursorY > pageHeight - margin) {
+        doc.addPage();
+        cursorY = margin;
+      }
+      doc.text(line, margin, cursorY);
+      cursorY += 7; // Line height
+    });
+
+    doc.save('pressbook-chapter.pdf');
   };
 
   return (
@@ -212,7 +298,7 @@ export default function App() {
                             {isDragActive ? "Drop the file here" : "Drag & drop a file here"}
                           </p>
                           <p className="text-xs text-stone-400 mt-1">
-                            Supports .txt, .html, .md
+                            Supports .txt, .html, .md, .pdf, .docx
                           </p>
                         </div>
                       </div>
@@ -291,18 +377,38 @@ export default function App() {
             <div className="bg-white rounded-2xl shadow-sm border border-stone-200 flex flex-col overflow-hidden h-full">
               <div className="px-4 py-3 border-b border-stone-100 flex items-center justify-between bg-stone-50/50">
                 <span className="text-sm font-semibold text-stone-600">Converted Output</span>
-                {result && (
-                  <button 
-                    onClick={() => copyToClipboard(result.convertedContent)}
-                    className={cn(
-                      "text-xs font-medium px-3 py-1.5 rounded-lg flex items-center gap-2 transition-all",
-                      copied ? "bg-emerald-100 text-emerald-700" : "bg-white border border-stone-200 text-stone-600 hover:bg-stone-50"
-                    )}
-                  >
-                    {copied ? <Check size={14} /> : <Clipboard size={14} />}
-                    {copied ? "Copied!" : "Copy LaTeX"}
-                  </button>
-                )}
+                <div className="flex items-center gap-2">
+                  {result && (
+                    <>
+                      <button 
+                        onClick={downloadMarkdown}
+                        className="text-xs font-medium px-3 py-1.5 rounded-lg bg-white border border-stone-200 text-stone-600 hover:bg-stone-50 transition-all flex items-center gap-2"
+                        title="Download Markdown"
+                      >
+                        <FileText size={14} />
+                        .MD
+                      </button>
+                      <button 
+                        onClick={downloadPDF}
+                        className="text-xs font-medium px-3 py-1.5 rounded-lg bg-white border border-stone-200 text-stone-600 hover:bg-stone-50 transition-all flex items-center gap-2"
+                        title="Download PDF"
+                      >
+                        <Download size={14} />
+                        .PDF
+                      </button>
+                      <button 
+                        onClick={() => copyToClipboard(result.convertedContent)}
+                        className={cn(
+                          "text-xs font-medium px-3 py-1.5 rounded-lg flex items-center gap-2 transition-all",
+                          copied ? "bg-emerald-100 text-emerald-700" : "bg-white border border-stone-200 text-stone-600 hover:bg-stone-50"
+                        )}
+                      >
+                        {copied ? <Check size={14} /> : <Clipboard size={14} />}
+                        {copied ? "Copied!" : "Copy"}
+                      </button>
+                    </>
+                  )}
+                </div>
               </div>
 
               <div className="flex-1 flex flex-col overflow-hidden">
@@ -403,6 +509,7 @@ export default function App() {
               <li>• Raw LaTeX ($...$, $$...$$, etc.)</li>
               <li>• MathJax HTML output</li>
               <li>• Google Docs exported HTML</li>
+              <li>• MS Word (.docx) & PDF</li>
               <li>• AsciiMath notation (e.g., `x^2`)</li>
             </ul>
           </div>
