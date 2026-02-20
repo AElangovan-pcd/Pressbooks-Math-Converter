@@ -1,0 +1,5 @@
+{
+  "name": "Pressbooks Math Converter",
+  "description": "Expert math typesetting converter for migrating MathJax/LaTeX into Pressbooks-compatible shortcodes.",
+  "requestFramePermissions": []
+}
